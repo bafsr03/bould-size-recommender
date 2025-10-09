@@ -1,0 +1,43 @@
+version: "3.8"
+services:
+  garments_api:
+    build:
+      context: ../Automatic-Garments-Size-Measurement-using-HRNet-and-Point-Cloud
+      dockerfile: api_app/Dockerfile
+    environment:
+      - API_PREFIX=/v1
+      - JWT_SECRET=change-me
+    ports:
+      - "8001:8000"
+    volumes:
+      - ../Automatic-Garments-Size-Measurement-using-HRNet-and-Point-Cloud:/app
+
+  body_api:
+    build:
+      context: ../Human-Body-Measurements-using-Computer-Vision/api
+      dockerfile: Dockerfile
+    environment:
+      - API_PREFIX=/api/v1
+    ports:
+      - "8002:8000"
+    depends_on:
+      - redis
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+
+  bould:
+    build: .
+    environment:
+      - API_KEY=change-me
+      - GARMENTS_API_BASE=http://garments_api:8000/v1
+      - BODY_API_BASE=http://body_api:8000/api/v1
+      - VTO_PROVIDER=mock
+    ports:
+      - "8100:8100"
+    depends_on:
+      - garments_api
+      - body_api
+    volumes:
+      - ./storage:/app/storage
