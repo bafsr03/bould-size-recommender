@@ -1,4 +1,5 @@
 import os
+import mimetypes
 import httpx
 from typing import Dict
 from ..config import settings
@@ -31,7 +32,9 @@ class BodyApiClient:
     async def analyze_file(self, height_cm: float, image_path: str) -> Dict[str, float]:
         token = await self._ensure_token()
         with open(image_path, "rb") as f:
-            files = {"image": (os.path.basename(image_path), f, "application/octet-stream")}
+            guessed, _ = mimetypes.guess_type(image_path)
+            content_type = guessed or "image/jpeg"
+            files = {"image": (os.path.basename(image_path), f, content_type)}
             data = {"height": str(height_cm)}
             async with httpx.AsyncClient(timeout=120.0) as client:
                 resp = await client.post(
@@ -46,3 +49,4 @@ class BodyApiClient:
                     raise RuntimeError("Body API analyze failed")
                 measurements = payload.get("measurements") or {}
                 return {k: float(v) for k, v in measurements.items() if isinstance(v, (int, float, str))}
+

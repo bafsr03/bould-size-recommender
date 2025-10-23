@@ -24,3 +24,4 @@ class RecommendResponse(BaseModel):
     match_details: Dict[str, Dict[str, float]]
     tailor_feedback: str
     debug: Dict[str, str] | None = None
+

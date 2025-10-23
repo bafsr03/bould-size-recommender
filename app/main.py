@@ -11,6 +11,7 @@ import structlog
 from .config import settings
 from .routers.recommend import router as recommend_router
 from .routers.tryon import router as tryon_router
+from .routers.process import router as process_router
 from .security import create_jwt
 
 
@@ -101,3 +102,4 @@ app.mount("/files", StaticFiles(directory=settings.storage_dir), name="files")
 # Routers under versioned prefix
 app.include_router(recommend_router, prefix="/v1")
 app.include_router(tryon_router, prefix="/v1")
+app.include_router(process_router, prefix="/v1")

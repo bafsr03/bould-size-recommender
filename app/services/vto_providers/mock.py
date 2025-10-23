@@ -1,7 +1,7 @@
 import os
 from PIL import Image
 import uuid
-from ..config import settings
+from ...config import settings
 
 
 class MockTryOnProvider:
@@ -31,3 +31,4 @@ class MockTryOnProvider:
         out_path = os.path.join(settings.storage_dir, f"tryon_{uuid.uuid4().hex}.jpg")
         canvas.save(out_path, format="JPEG", quality=90)
         return out_path
+

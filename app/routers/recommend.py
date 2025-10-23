@@ -76,12 +76,12 @@ async def recommend(
 
     size_scale_path = garment_result.get("size_scale")
     measurement_vis = garment_result.get("measurement_vis")
-    if not size_scale_path or not os.path.exists(size_scale_path):
+    if not size_scale_path:
         raise HTTPException(status_code=502, detail="Garment API did not return a valid size scale")
 
     try:
-        with open(size_scale_path, "r") as f:
-            size_scale = json.load(f)
+        # Read the JSON via garments API /files endpoint (container-safe)
+        size_scale = await garment_client.read_json_file(size_scale_path)
     except Exception:
         raise HTTPException(status_code=502, detail="Failed to read size scale JSON from garment API output")
 
@@ -109,3 +109,4 @@ async def recommend(
             "size_scale_unit": size_scale.get("unit", ""),
         },
     )
+

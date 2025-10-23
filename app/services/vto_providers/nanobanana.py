@@ -1,7 +1,7 @@
 import json
 from typing import List
 import httpx
-from ..config import settings
+from ...config import settings
 from .base import TryOnProvider
 
 
@@ -40,3 +40,4 @@ class NanoBananaProvider:
             resp = await client.post(f"{settings.nano_api_base}/api/v1/jobs/createTask", headers=headers, json=payload)
             resp.raise_for_status()
             return resp.json()
+

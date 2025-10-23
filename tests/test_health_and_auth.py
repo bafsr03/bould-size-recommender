@@ -16,3 +16,4 @@ def test_token():
     r = client.post("/v1/auth/token")
     assert r.status_code == 200
     assert "token" in r.json()
+

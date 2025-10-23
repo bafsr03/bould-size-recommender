@@ -51,3 +51,4 @@ class TailorLLM:
         except Exception:
             # Fallback on any error
             return f"Recommended size: {size}. If any area feels tight (negative slack), consider sizing up or minor alterations."
+

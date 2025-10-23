@@ -16,6 +16,10 @@ class Settings(BaseModel):
 
     vto_provider: str = os.getenv("VTO_PROVIDER", "mock")
 
+    # Public base URL where this orchestrator is reachable from the internet
+    # Used to construct public asset URLs for providers like NanoBanana
+    public_base_url: str | None = os.getenv("PUBLIC_BASE_URL")
+
     storage_dir: str = os.getenv("STORAGE_DIR", os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "storage")))
 
     # JWT

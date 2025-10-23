@@ -1,4 +1,5 @@
 import os
+import mimetypes
 import httpx
 from typing import Dict, Any
 from ..config import settings
@@ -25,7 +26,9 @@ class GarmentApiClient:
     async def process_image(self, image_path: str, category_id: int, true_size: str, unit: str) -> Dict[str, Any]:
         token = await self._ensure_token()
         with open(image_path, "rb") as f:
-            files = {"image": (os.path.basename(image_path), f, "application/octet-stream")}
+            guessed, _ = mimetypes.guess_type(image_path)
+            content_type = guessed or "image/jpeg"
+            files = {"image": (os.path.basename(image_path), f, content_type)}
             data = {
                 "category_id": str(category_id),
                 "true_size": true_size,
@@ -40,3 +43,19 @@ class GarmentApiClient:
                 )
                 resp.raise_for_status()
                 return resp.json()
+
+    async def read_json_file(self, absolute_path: str) -> Dict[str, Any]:
+        """Fetch a JSON file produced by the garments API using its /files endpoint.
+        This avoids trying to read container-local paths from the orchestrator container.
+        """
+        token = await self._ensure_token()
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            resp = await client.get(
+                f"{self.base}/files",
+                params={"path": absolute_path},
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            resp.raise_for_status()
+            # Response is the raw file contents; parse as JSON
+            return resp.json()
+

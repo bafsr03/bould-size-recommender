@@ -33,3 +33,4 @@ def test_nano_create_task_ok(monkeypatch):
     assert data["code"] == 200
     assert data["data"]["taskId"] == "task_123"
     assert route.called
+

@@ -14,8 +14,8 @@ services:
 
   body_api:
     build:
-      context: ../Human-Body-Measurements-using-Computer-Vision/api
-      dockerfile: Dockerfile
+      context: ../Human-Body-Measurements-using-Computer-Vision
+      dockerfile: api/Dockerfile
     environment:
       - API_PREFIX=/api/v1
     ports:
@@ -26,7 +26,6 @@ services:
     image: redis:7-alpine
     ports:
       - "6379:6379"
-
   bould:
     build: .
     environment:
@@ -34,6 +33,9 @@ services:
       - GARMENTS_API_BASE=http://garments_api:8000/v1
       - BODY_API_BASE=http://body_api:8000/api/v1
       - VTO_PROVIDER=mock
+      - OPENAI_API_KEY=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
+      - NANO_API_KEY=sk-306f49fdfab4f8edcf55e41254cfe442
+      - NANO_MODEL=google/nano-banana-edit
     ports:
       - "8100:8100"
     depends_on:
@@ -41,3 +43,4 @@ services:
       - body_api
     volumes:
       - ./storage:/app/storage
+
