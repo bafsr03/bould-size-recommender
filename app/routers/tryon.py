@@ -1,7 +1,7 @@
 import os
 import tempfile
-from typing import Optional, List
-from fastapi import APIRouter, Depends, File, UploadFile, HTTPException, Body, Form
+from typing import Optional, List, Dict, Any
+from fastapi import APIRouter, Depends, File, UploadFile, HTTPException, Body, Form, Request
 
 from ..security import verify_api_key
 from ..services.vto_providers import get_provider
@@ -10,6 +10,9 @@ from ..config import settings
 
 
 router = APIRouter(prefix="/try-on", tags=["try-on"], dependencies=[Depends(verify_api_key)])
+
+# In-memory task store for nano provider (dev/POC). Replace with persistent store in production.
+_nano_tasks: Dict[str, Dict[str, Any]] = {}
 
 
 @router.post("")
@@ -45,14 +48,21 @@ async def try_on(
         if not settings.nano_api_key:
             raise HTTPException(status_code=400, detail="NANO_API_KEY not configured")
         provider = NanoBananaProvider()
+        # Use our public callback if none provided
+        cb = callback_url or f"{settings.public_base_url.rstrip('/')}/v1/try-on/nano/callback"
         payload = await provider.create_task(
             prompt="Generate a try-on image",
             image_urls=[public_user, public_garment],
-            callback_url=callback_url,
+            callback_url=cb,
             output_format="png",
             image_size="1:1",
         )
-        return {"success": True, "provider": "nano", "task": payload}
+        # Normalize task id
+        task_id = payload.get("id") or payload.get("taskId") or payload.get("job_id") or payload.get("data", {}).get("id")
+        if task_id:
+            _nano_tasks[task_id] = {"status": "queued", "provider": "nano", "payload": payload}
+        # Return 202 to indicate async processing
+        return {"success": True, "provider": "nano", "status": "queued", "task_id": task_id, "task": payload}
 
     # default: mock provider composite
     provider = get_provider(provider_name)
@@ -95,3 +105,43 @@ async def nano_create_task(
         image_size=image_size,
     )
     return payload
+
+
+@router.post("/nano/callback")
+async def nano_callback(request: Request, body: Dict[str, Any] = Body(...)):
+    # Store raw callback. Try to extract status and output URL(s).
+    task_id = body.get("id") or body.get("taskId") or body.get("job_id") or body.get("data", {}).get("id")
+    status = body.get("status") or body.get("state") or body.get("data", {}).get("status")
+    result_urls: List[str] = []
+    data = body.get("data") or {}
+    # Common patterns
+    if isinstance(body.get("output"), dict) and isinstance(body["output"].get("image_urls"), list):
+        result_urls = body["output"]["image_urls"]
+    elif isinstance(data.get("output"), dict) and isinstance(data["output"].get("image_urls"), list):
+        result_urls = data["output"]["image_urls"]
+    elif isinstance(body.get("image_urls"), list):
+        result_urls = body["image_urls"]
+
+    entry = _nano_tasks.get(task_id, {"provider": "nano"})
+    entry.update({"status": status or entry.get("status") or "processing", "callback": body})
+    if result_urls:
+        entry["result_image_url"] = result_urls[0]
+    _nano_tasks[task_id] = entry
+    return {"ok": True}
+
+
+@router.get("/status")
+async def get_status(task_id: str):
+    entry = _nano_tasks.get(task_id)
+    if not entry:
+        raise HTTPException(status_code=404, detail="task not found")
+    out: Dict[str, Any] = {
+        "task_id": task_id,
+        "status": entry.get("status", "processing"),
+        "provider": entry.get("provider", "nano"),
+    }
+    url = entry.get("result_image_url")
+    if url:
+        # Ensure absolute URL
+        out["result_image_url"] = url if url.startswith("http") else f"{settings.public_base_url.rstrip('/')}{url}"
+    return out

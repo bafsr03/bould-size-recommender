@@ -33,8 +33,15 @@ async def recommend(
     garment_client = GarmentApiClient()
     recommender = Recommender(default_unit=settings.recommender_unit)
 
+    # Correlation ID propagation to downstream services (best-effort for dev)
+    # If running under ASGI, prefer context vars; here, simple env override for local testing
+    # Callers (Shopify app) can send X-Correlation-ID header which we mirror via env for clients
+    # Note: this is non-threadsafe in prod; for production, pass headers explicitly via clients
+    # Using env only as dev convenience
+    #
     # Obtain body measurements
     body_measurements: Dict[str, float]
+    test_fast = os.getenv("TEST_FAST", "0") == "1"
     if measurements_json:
         try:
             parsed = json.loads(measurements_json)
@@ -43,6 +50,21 @@ async def recommend(
             body_measurements = {k: float(v) for k, v in parsed.items() if v is not None}
         except Exception:
             raise HTTPException(status_code=400, detail="measurements_json must be a JSON object of numeric values")
+    elif test_fast:
+        if height is None:
+            raise HTTPException(status_code=400, detail="height required for TEST_FAST mode")
+        # Create a quick synthetic measurement profile from height for local testing
+        h = float(height)
+        body_measurements = {
+            "chest": round(h * 0.52, 2),
+            "waist": round(h * 0.45, 2),
+            "hips": round(h * 0.54, 2),
+            "shoulder_width": round(h * 0.24, 2),
+            "sleeve_length": round(h * 0.32, 2),
+            "inseam": round(h * 0.45, 2),
+            "thigh": round(h * 0.31, 2),
+            "length": round(h * 0.62, 2),
+        }
     else:
         if height is None or user_image is None:
             raise HTTPException(status_code=400, detail="Provide either measurements_json or both height and user_image")

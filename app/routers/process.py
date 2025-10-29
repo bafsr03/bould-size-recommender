@@ -68,7 +68,7 @@ async def get_file(path: str, _=Depends(verify_api_key)):
         
         # Construct the file URL on the garments API
         garments_base = settings.garments_api_base.rstrip("/")
-        file_url = f"{garments_base}/files?path={path}"
+        file_url = f"{garments_base}/v1/files?path={path}"
         
         # Fetch the file from garments API
         async with httpx.AsyncClient(timeout=30.0) as client:
