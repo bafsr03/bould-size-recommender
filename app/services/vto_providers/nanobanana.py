@@ -41,3 +41,41 @@ class NanoBananaProvider:
             resp.raise_for_status()
             return resp.json()
 
+    @staticmethod
+    async def query_task(task_id: str) -> dict:
+        """Query task status directly from NanoBanana. Returns the raw JSON.
+        Docs: GET /api/v1/jobs/recordInfo?taskId=...
+        """
+        headers = {
+            "Authorization": f"Bearer {settings.nano_api_key}",
+        }
+        params = {"taskId": task_id}
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.get(f"{settings.nano_api_base}/api/v1/jobs/recordInfo", headers=headers, params=params)
+            
+            # Check HTTP status first
+            if resp.status_code != 200:
+                # Try to parse error response
+                try:
+                    error_data = resp.json()
+                    return error_data
+                except:
+                    resp.raise_for_status()
+            
+            data = resp.json()
+            
+            # Check for error codes in response body
+            code = data.get("code")
+            is_error_code = False
+            if code:
+                if isinstance(code, int) and code != 200:
+                    is_error_code = True
+                elif isinstance(code, str) and str(code).lower() not in ("success", "ok", "200"):
+                    is_error_code = True
+            
+            if is_error_code:
+                # Return the error response as-is so caller can handle it
+                return data
+            
+            return data
+

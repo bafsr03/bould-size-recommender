@@ -10,9 +10,22 @@ from ..config import settings
 
 
 router = APIRouter(prefix="/try-on", tags=["try-on"], dependencies=[Depends(verify_api_key)])
+# Public router without auth dependencies (for third-party callbacks)
+public_router = APIRouter(prefix="/try-on", tags=["try-on"]) 
 
 # In-memory task store for nano provider (dev/POC). Replace with persistent store in production.
 _nano_tasks: Dict[str, Dict[str, Any]] = {}
+
+
+def _safe_suffix(filename: Optional[str], fallback: str = ".jpg") -> str:
+    """Return a filesystem-safe suffix derived from the uploaded filename."""
+    if not filename:
+        return fallback
+    name = os.path.basename(filename)
+    # Strip query strings or fragments that may be appended (common with CDN URLs)
+    name = name.split("?")[0].split("#")[0]
+    suffix = os.path.splitext(name)[1]
+    return suffix or fallback
 
 
 @router.post("")
@@ -27,17 +40,18 @@ async def try_on(
       Requires PUBLIC_BASE_URL and NANO_API_KEY. Response is 202 with task payload.
     """
     provider_name = (settings.vto_provider or "mock").lower()
+    is_nano_provider = provider_name in {"nano", "nanobanana", "nano-banana", "nano-banana-edit"}
 
     # Save incoming files to storage
     os.makedirs(settings.storage_dir, exist_ok=True)
-    with tempfile.NamedTemporaryFile(delete=False, dir=settings.storage_dir, suffix=os.path.splitext(user_image.filename or "user.jpg")[1] or ".jpg") as utmp:
+    with tempfile.NamedTemporaryFile(delete=False, dir=settings.storage_dir, suffix=_safe_suffix(user_image.filename, ".jpg")) as utmp:
         utmp.write(await user_image.read())
         user_path = utmp.name
-    with tempfile.NamedTemporaryFile(delete=False, dir=settings.storage_dir, suffix=os.path.splitext(garment_image.filename or "garment.jpg")[1] or ".jpg") as gtmp:
+    with tempfile.NamedTemporaryFile(delete=False, dir=settings.storage_dir, suffix=_safe_suffix(garment_image.filename, ".jpg")) as gtmp:
         gtmp.write(await garment_image.read())
         garment_path = gtmp.name
 
-    if provider_name == "nano":
+    if is_nano_provider:
         # Need PUBLIC_BASE_URL to build public URLs Nano can fetch
         if not settings.public_base_url:
             raise HTTPException(status_code=400, detail="PUBLIC_BASE_URL not configured for nano provider")
@@ -58,7 +72,18 @@ async def try_on(
             image_size="1:1",
         )
         # Normalize task id
-        task_id = payload.get("id") or payload.get("taskId") or payload.get("job_id") or payload.get("data", {}).get("id")
+        data_block = payload.get("data", {}) if isinstance(payload.get("data"), dict) else {}
+        task_id = (
+            payload.get("id")
+            or payload.get("taskId")
+            or payload.get("job_id")
+            or payload.get("jobId")
+            or data_block.get("id")
+            or data_block.get("taskId")
+            or data_block.get("task_id")
+            or data_block.get("jobId")
+            or data_block.get("job_id")
+        )
         if task_id:
             _nano_tasks[task_id] = {"status": "queued", "provider": "nano", "payload": payload}
         # Return 202 to indicate async processing
@@ -107,14 +132,69 @@ async def nano_create_task(
     return payload
 
 
-@router.post("/nano/callback")
+@public_router.post("/nano/callback")
 async def nano_callback(request: Request, body: Dict[str, Any] = Body(...)):
     # Store raw callback. Try to extract status and output URL(s).
-    task_id = body.get("id") or body.get("taskId") or body.get("job_id") or body.get("data", {}).get("id")
-    status = body.get("status") or body.get("state") or body.get("data", {}).get("status")
-    result_urls: List[str] = []
+    task_id = body.get("id") or body.get("taskId") or body.get("job_id") or body.get("jobId") or body.get("data", {}).get("id") or body.get("data", {}).get("taskId")
     data = body.get("data") or {}
-    # Common patterns
+    
+    # Log callback for debugging
+    import structlog
+    logger = structlog.get_logger("bould")
+    
+    if not task_id:
+        logger.warning("nano_callback_missing_task_id", body_keys=list(body.keys()), data_keys=list(data.keys()) if isinstance(data, dict) else None)
+        # Try to extract from raw body string if available
+        return {"ok": True, "warning": "task_id not found in callback"}
+    
+    # Extract status from multiple possible locations
+    status = (
+        body.get("status") 
+        or body.get("state") 
+        or data.get("status") 
+        or data.get("state")
+        or body.get("code")  # Some APIs use code field
+    )
+    
+    # Normalize status values
+    status_str = str(status).lower() if status else None
+    if status_str in ("fail", "failed", "error", "failure"):
+        status = "fail"
+    elif status_str in ("success", "completed", "done", "finish"):
+        status = "success"
+    elif status_str in ("pending", "processing", "generating", "running"):
+        status = "processing"
+    else:
+        status = status or "processing"
+    
+    result_urls: List[str] = []
+    fail_msg = (
+        body.get("failMsg")
+        or body.get("failMessage")
+        or body.get("message")  # Generic message field
+        or body.get("msg")
+        or data.get("failMsg")
+        or data.get("failMessage")
+        or data.get("message")
+        or data.get("msg")
+    )
+    
+    # Check for error codes
+    code = body.get("code") or data.get("code")
+    is_error_code = False
+    if code:
+        if isinstance(code, int) and code != 200:
+            is_error_code = True
+        elif isinstance(code, str) and code.lower() not in ("success", "ok", "200"):
+            is_error_code = True
+    
+    if is_error_code:
+        if not fail_msg:
+            fail_msg = body.get("message") or data.get("message") or body.get("msg") or data.get("msg") or f"Error code: {code}"
+        if status == "processing":
+            status = "fail"
+    
+    # Common patterns for result URLs
     if isinstance(body.get("output"), dict) and isinstance(body["output"].get("image_urls"), list):
         result_urls = body["output"]["image_urls"]
     elif isinstance(data.get("output"), dict) and isinstance(data["output"].get("image_urls"), list):
@@ -123,18 +203,92 @@ async def nano_callback(request: Request, body: Dict[str, Any] = Body(...)):
         result_urls = body["image_urls"]
 
     entry = _nano_tasks.get(task_id, {"provider": "nano"})
-    entry.update({"status": status or entry.get("status") or "processing", "callback": body})
+    entry.update({"status": status, "callback": body})
+    if fail_msg:
+        entry["error"] = fail_msg
     if result_urls:
         entry["result_image_url"] = result_urls[0]
     _nano_tasks[task_id] = entry
+    
+    logger.info("nano_callback_received", task_id=task_id, status=status, has_error=bool(fail_msg), error_msg=fail_msg[:100] if fail_msg else None)
+    
     return {"ok": True}
 
 
 @router.get("/status")
 async def get_status(task_id: str):
-    entry = _nano_tasks.get(task_id)
-    if not entry:
-        raise HTTPException(status_code=404, detail="task not found")
+    entry = _nano_tasks.get(task_id, {"provider": "nano"})
+    status = entry.get("status", "processing")
+
+    # Fallback: if we don't yet have a result and status is not already failed, query provider directly
+    # Don't query if status is already "fail" - trust the callback
+    if status not in ("success", "completed", "fail") or not entry.get("result_image_url"):
+        try:
+            info = await NanoBananaProvider.query_task(task_id)
+            # Expected shape (per docs): { code, msg, data: { state, resultJson, ... } }
+            code = info.get("code") if isinstance(info, dict) else None
+            
+            # Check for error codes
+            is_error_code = False
+            if code:
+                if isinstance(code, int) and code != 200:
+                    is_error_code = True
+                elif isinstance(code, str) and str(code).lower() not in ("success", "ok", "200"):
+                    is_error_code = True
+            
+            if is_error_code:
+                fail_msg = info.get("msg") or info.get("message") or f"Error code: {code}"
+                entry["status"] = "fail"
+                entry["error"] = fail_msg
+                _nano_tasks[task_id] = entry
+            else:
+                data = (info or {}).get("data") or {}
+                state = data.get("state") or data.get("status") or info.get("status") or status
+                
+                # Normalize state values
+                state_str = str(state).lower() if state else None
+                if state_str in ("fail", "failed", "error", "failure"):
+                    state = "fail"
+                elif state_str in ("success", "completed", "done", "finish"):
+                    state = "success"
+                elif state_str in ("pending", "processing", "generating", "running"):
+                    state = "processing"
+                
+                entry["status"] = state
+                
+                # Capture failure info if provided
+                fail_msg = (
+                    data.get("failMsg") 
+                    or data.get("failMessage") 
+                    or data.get("message")
+                    or data.get("msg")
+                    or (info or {}).get("msg")
+                    or (info or {}).get("message")
+                )
+                if fail_msg:
+                    entry["error"] = fail_msg
+                
+                # Parse resultJson if present
+                result_json = data.get("resultJson")
+                if isinstance(result_json, str) and result_json.strip():
+                    import json as _json
+                    try:
+                        parsed = _json.loads(result_json)
+                        urls = parsed.get("resultUrls") or parsed.get("image_urls") or []
+                        if isinstance(urls, list) and urls:
+                            entry["result_image_url"] = urls[0]
+                    except Exception:
+                        pass
+                _nano_tasks[task_id] = entry
+        except Exception as e:
+            # Log errors but don't fail if task is still processing
+            import structlog
+            logger = structlog.get_logger("bould")
+            logger.warning("status_query_error", task_id=task_id, error=str(e))
+            # Only update if we don't have a status yet
+            if status == "processing" and not entry.get("error"):
+                pass  # Keep processing status
+
     out: Dict[str, Any] = {
         "task_id": task_id,
         "status": entry.get("status", "processing"),
@@ -142,6 +296,8 @@ async def get_status(task_id: str):
     }
     url = entry.get("result_image_url")
     if url:
-        # Ensure absolute URL
+        # Absolute URL passthrough
         out["result_image_url"] = url if url.startswith("http") else f"{settings.public_base_url.rstrip('/')}{url}"
+    if entry.get("error"):
+        out["error"] = entry["error"]
     return out
