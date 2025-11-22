@@ -14,7 +14,7 @@ class TailorLLM:
         self.api_key = settings.openai_api_key
         self.client = AsyncOpenAI(api_key=self.api_key) if (self.api_key and AsyncOpenAI) else None
 
-    async def generate_feedback(self, category_id: int, body: Dict[str, float], garment: Dict[str, float], slacks: Dict[str, float], size: str) -> str:
+    async def generate_feedback(self, category_id: int, body: Dict[str, float], garment: Dict[str, float], slacks: Dict[str, float], size: str, tone: str | None = None) -> str:
         # If no client available, produce deterministic rule-based feedback
         if not self.client:
             parts = []
@@ -32,6 +32,9 @@ class TailorLLM:
             "You are an expert clothing tailor. Given body measurements, garment measurements for a selected size, and slacks (garment - (body + ease)), "
             "write a short, plain-language fitting note (<=80 words). Include what fits, what is tight/loose, and one alteration suggestion."
         )
+        if tone:
+            prompt += f"\n\nTone/Style: {tone}"
+
         content = {
             "category_id": category_id,
             "recommended_size": size,

@@ -84,6 +84,7 @@ class Recommender:
         garment_scale: Dict[str, Any],
         garment_category_id: int,
         brand_scale: Dict[str, Any] | None = None,
+        tone: str | None = None,
     ) -> Dict[str, Any]:
         # Normalize body to cm
         body_cm = {k: _to_cm(v, self.default_unit) for k, v in body_measurements.items() if isinstance(v, (int, float))}
@@ -156,6 +157,7 @@ class Recommender:
             garment=table.get(best_size, {}),
             slacks=best_details,
             size=best_size or "",
+            tone=tone,
         )
 
         return {

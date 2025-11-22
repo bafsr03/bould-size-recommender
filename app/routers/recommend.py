@@ -28,6 +28,7 @@ async def recommend(
     true_size: str = Form(...),
     unit: str = Form("cm"),
     brand_chart_json: Optional[str] = Form(None),
+    tone: Optional[str] = Form(None),
 ) -> RecommendResponse:
     body_client = BodyApiClient()
     garment_client = GarmentApiClient()
@@ -119,6 +120,7 @@ async def recommend(
         garment_scale=size_scale,
         garment_category_id=category_id,
         brand_scale=brand_chart,
+        tone=tone,
     )
 
     return RecommendResponse(
