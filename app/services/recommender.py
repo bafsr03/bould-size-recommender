@@ -97,29 +97,45 @@ class Recommender:
         # Choose table to evaluate: prefer brand if provided, otherwise measurement-derived
         table = brand_cm or scale_cm
 
-        best_size = None
-        best_score = float("inf")
-        best_details: Dict[str, float] = {}
+        print(f"DEBUG: Body Measurements (cm): {body_cm}")
+        print(f"DEBUG: Garment Scale Table: {json.dumps(table, indent=2)}")
+
+        best_ok_size = None
+        best_ok_score = float("inf")
+        best_ok_details: Dict[str, float] = {}
+
+        best_fallback_size = None
+        best_fallback_score = float("inf")
+        best_fallback_details: Dict[str, float] = {}
 
         for size in SIZE_ORDER:
             if size not in table:
                 continue
             ok, score, details = _score_size(relevant, body_cm, table[size], garment_category_id)
-            # prefer all_ok; among ok, minimal slack; otherwise minimal violations (score stays >0 only from positive slack; we need a penalty)
-            penalty = sum(-v for v in details.values() if v < 0)
-            effective = (score, penalty)
+            
             if ok:
-                # prioritize ok solutions with smaller score
-                if best_size is None or (best_size is not None and best_score > score):
-                    best_size = size
-                    best_score = score
-                    best_details = details
+                # It fits! Look for the tightest fit (lowest score) among fitting sizes.
+                if score < best_ok_score:
+                    best_ok_size = size
+                    best_ok_score = score
+                    best_ok_details = details
             else:
-                # no-ok yet; pick least-violating using smaller penalty
-                if best_size is None:
-                    best_size = size
-                    best_score = score + penalty
-                    best_details = details
+                # It doesn't fit. Track the "least bad" failure as fallback.
+                # We use (score + penalty) to find the one closest to fitting.
+                penalty = sum(-v for v in details.values() if v < 0)
+                combined_score = score + penalty
+                if combined_score < best_fallback_score:
+                    best_fallback_size = size
+                    best_fallback_score = combined_score
+                    best_fallback_details = details
+
+        # Prefer the best fitting size; if none fit, use the best fallback
+        if best_ok_size is not None:
+            best_size = best_ok_size
+            best_details = best_ok_details
+        else:
+            best_size = best_fallback_size
+            best_details = best_fallback_details
 
         if best_size is None:
             # fallback to true_size if present in table else closest available
