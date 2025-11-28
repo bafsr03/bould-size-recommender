@@ -128,6 +128,8 @@ async def recommend(
         confidence=result["confidence"],
         match_details=result["match_details"],
         tailor_feedback=result["tailor_feedback"],
+        preview_feedback=result.get("preview_feedback", []),
+        final_feedback=result.get("final_feedback", ""),
         debug={
             "measurement_vis_url": measurement_vis or "",
             "size_scale_unit": size_scale.get("unit", ""),

@@ -151,7 +151,7 @@ class Recommender:
         avg_slack = sum(max(v, 0.0) for v in best_details.values()) / max(len(best_details) or 1, 1)
         confidence = max(0.0, 1.0 - 0.1 * violations - 0.02 * avg_slack)
 
-        tailor_feedback = await self.llm.generate_feedback(
+        tailor_feedback_data = await self.llm.generate_feedback(
             category_id=garment_category_id,
             body=body_cm,
             garment=table.get(best_size, {}),
@@ -160,10 +160,15 @@ class Recommender:
             tone=tone,
         )
 
+        final_feedback = tailor_feedback_data.get("final", "")
+        preview_feedback = tailor_feedback_data.get("preview", [])
+
         return {
             "recommended_size": best_size or "",
             "confidence": round(confidence, 3),
             "match_details": {"slacks_cm": best_details},
-            "tailor_feedback": tailor_feedback,
+            "tailor_feedback": final_feedback,  # Backward compatibility
+            "preview_feedback": preview_feedback,
+            "final_feedback": final_feedback,
         }
 

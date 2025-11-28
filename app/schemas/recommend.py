@@ -22,6 +22,8 @@ class RecommendResponse(BaseModel):
     recommended_size: str
     confidence: float
     match_details: Dict[str, Dict[str, float]]
-    tailor_feedback: str
+    tailor_feedback: str  # Kept for backward compatibility
+    preview_feedback: List[str]
+    final_feedback: str
     debug: Dict[str, str] | None = None
 
