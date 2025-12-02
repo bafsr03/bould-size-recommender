@@ -22,8 +22,12 @@ async def recommend(
     # or path B: provide height + image and we will call Body API
     height: Optional[float] = Form(None),
     user_image: Optional[UploadFile] = File(None),
-    # Garment inputs (required)
-    garment_image: UploadFile = File(...),
+    # Garment inputs
+    # Path A: Provide image to process (legacy/direct)
+    garment_image: Optional[UploadFile] = File(None),
+    # Path B: Provide pre-calculated scale JSON (new/preferred)
+    garment_scale_json: Optional[str] = Form(None),
+    
     category_id: int = Form(...),
     true_size: str = Form(...),
     unit: str = Form("cm"),
@@ -80,33 +84,51 @@ async def recommend(
             except Exception:
                 pass
 
-    # Call garment API
-    with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(garment_image.filename or "garment.jpg")[1] or ".jpg") as gtmp:
-        gtmp.write(await garment_image.read())
-        garment_path = gtmp.name
-    try:
-        garment_result = await garment_client.process_image(
-            image_path=garment_path,
-            category_id=category_id,
-            true_size=true_size,
-            unit=unit,
-        )
-    finally:
+    # Obtain Garment Scale
+    size_scale = {}
+    measurement_vis = None
+    
+    if garment_scale_json:
         try:
-            os.remove(garment_path)
+            size_scale = json.loads(garment_scale_json)
+            # If the client provides a specific scale, we trust it.
+            # We might still need measurement_vis if they want it, but usually that comes from process step.
+            # If they provided garment_image too, we could process it for vis, but let's assume
+            # if they provide scale, they already have what they need or don't need vis here.
         except Exception:
-            pass
+            raise HTTPException(status_code=400, detail="garment_scale_json must be a valid JSON object")
+            
+    elif garment_image:
+        # Call garment API
+        with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(garment_image.filename or "garment.jpg")[1] or ".jpg") as gtmp:
+            gtmp.write(await garment_image.read())
+            garment_path = gtmp.name
+        try:
+            garment_result = await garment_client.process_image(
+                image_path=garment_path,
+                category_id=category_id,
+                true_size=true_size,
+                unit=unit,
+            )
+        finally:
+            try:
+                os.remove(garment_path)
+            except Exception:
+                pass
 
-    size_scale_path = garment_result.get("size_scale")
-    measurement_vis = garment_result.get("measurement_vis")
-    if not size_scale_path:
-        raise HTTPException(status_code=502, detail="Garment API did not return a valid size scale")
+        size_scale_path = garment_result.get("size_scale")
+        measurement_vis = garment_result.get("measurement_vis")
+        if not size_scale_path:
+            raise HTTPException(status_code=502, detail="Garment API did not return a valid size scale")
 
-    try:
-        # Read the JSON via garments API /files endpoint (container-safe)
-        size_scale = await garment_client.read_json_file(size_scale_path)
-    except Exception:
-        raise HTTPException(status_code=502, detail="Failed to read size scale JSON from garment API output")
+        try:
+            # Read the JSON via garments API /files endpoint (container-safe)
+            size_scale = await garment_client.read_json_file(size_scale_path)
+        except Exception:
+            raise HTTPException(status_code=502, detail="Failed to read size scale JSON from garment API output")
+            
+    else:
+        raise HTTPException(status_code=400, detail="Provide either garment_scale_json or garment_image")
 
     brand_chart = None
     if brand_chart_json:

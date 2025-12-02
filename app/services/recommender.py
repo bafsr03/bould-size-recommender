@@ -4,7 +4,7 @@ from ..config import settings
 from .llm import TailorLLM
 
 
-SIZE_ORDER: List[str] = ["XS", "S", "M", "L", "XL", "XXL"]
+SIZE_ORDER: List[str] = ["XXS", "XS", "S", "M", "L", "XL", "XXL", "3XL", "4XL", "5XL", "6XL"]
 
 
 def _to_cm(value: float, unit: str) -> float:
@@ -19,6 +19,33 @@ def _to_cm(value: float, unit: str) -> float:
 def _normalize_scale(scale_obj: Dict[str, Any]) -> Dict[str, Dict[str, float]]:
     unit = (scale_obj.get("unit") or "cm").lower()
     scale = scale_obj.get("scale") or {}
+    
+    # Heuristic: Check if values look like inches even if unit says cm
+    # If we find chest/waist/hips values and they are all small (< 90), 
+    # it's extremely likely to be inches (since 90cm chest is ~35in, small-ish for adult)
+    # This is a safety net for missing/wrong unit data.
+    if unit in ("cm", "centimeter", "centimeters"):
+        all_small = True
+        has_metrics = False
+        for metrics in scale.values():
+            if not metrics: continue
+            for k, v in metrics.items():
+                if not isinstance(v, (int, float)): continue
+                if k.lower() in ("chest", "waist", "hips", "bust"):
+                    has_metrics = True
+                    if v > 90.0: # 90cm is ~35.5 inches. Wait, 90 inches is ~228cm.
+                        # If value is > 90, it's definitely CM (unless it's a tent).
+                        # 65 was too low (65in = 165cm). Some chests are > 65in.
+                        # Let's set it to 95. 95in = 241cm.
+                        all_small = False
+                        break
+            if not all_small:
+                break
+        
+        if has_metrics and all_small:
+            print("DEBUG: Detected implicit inches in scale table (values < 90). Treating as inches.")
+            unit = "inch"
+
     out: Dict[str, Dict[str, float]] = {}
     for size, metrics in scale.items():
         out[size] = {k: _to_cm(v, unit) for k, v in (metrics or {}).items() if isinstance(v, (int, float))}
@@ -53,6 +80,56 @@ def _ease_for_metric(metric: str, category_id: int) -> float:
     if m in ("inseam", "sleeve_length", "length"):
         return 1.0
     return 0.0
+
+
+def convert_scale(scale_obj: Dict[str, Any], target_unit: str) -> Dict[str, Any]:
+    """
+    Convert a scale object to the target unit (cm or inch).
+    """
+    current_unit = (scale_obj.get("unit") or "cm").lower()
+    target_unit = target_unit.lower()
+    
+    # Normalize current unit
+    if current_unit in ("centimeter", "centimeters"):
+        current_unit = "cm"
+    elif current_unit in ("inch", "inches"):
+        current_unit = "in"
+        
+    # Normalize target unit
+    if target_unit in ("centimeter", "centimeters"):
+        target_unit = "cm"
+    elif target_unit in ("inch", "inches"):
+        target_unit = "in"
+
+    if current_unit == target_unit:
+        return scale_obj
+
+    # Conversion factor
+    if current_unit == "cm" and target_unit == "in":
+        factor = 1.0 / 2.54
+    elif current_unit == "in" and target_unit == "cm":
+        factor = 2.54
+    else:
+        # Unknown unit, return as is or handle error? For now assume cm/in only
+        return scale_obj
+
+    new_scale = {}
+    old_scale = scale_obj.get("scale") or {}
+    
+    for size, metrics in old_scale.items():
+        new_metrics = {}
+        for k, v in (metrics or {}).items():
+            if isinstance(v, (int, float)):
+                new_metrics[k] = round(v * factor, 2)
+            else:
+                new_metrics[k] = v
+        new_scale[size] = new_metrics
+        
+    return {
+        "unit": target_unit,
+        "scale": new_scale
+    }
+
 
 
 def _score_size(relevant_metrics: List[str], body: Dict[str, float], garment: Dict[str, float], category_id: int) -> Tuple[bool, float, Dict[str, float]]:

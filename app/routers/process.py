@@ -45,7 +45,30 @@ async def process(
             unit=unit,
         )
         
-        # Return the raw result from garments API
+        # Fetch the generated size scale
+        size_scale_path = garment_result.get("size_scale")
+        if size_scale_path:
+            try:
+                # Read the JSON via garments API /files endpoint
+                size_scale = await garment_client.read_json_file(size_scale_path)
+                
+                # Generate complementary unit
+                from ..services.recommender import convert_scale
+                
+                scale_cm = convert_scale(size_scale, "cm")
+                scale_in = convert_scale(size_scale, "in")
+                
+                return {
+                    "raw": garment_result,
+                    "cm": scale_cm,
+                    "inch": scale_in
+                }
+            except Exception as e:
+                print(f"Error fetching/converting size scale: {e}")
+                # Fallback to raw result if something fails
+                return garment_result
+        
+        # Return the raw result from garments API if no size scale
         return garment_result
         
     finally:
