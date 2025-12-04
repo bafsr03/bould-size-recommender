@@ -33,6 +33,7 @@ async def recommend(
     unit: str = Form("cm"),
     brand_chart_json: Optional[str] = Form(None),
     tone: Optional[str] = Form(None),
+    body_unit: str = Form("cm"),
 ) -> RecommendResponse:
     body_client = BodyApiClient()
     garment_client = GarmentApiClient()
@@ -60,6 +61,8 @@ async def recommend(
             raise HTTPException(status_code=400, detail="height required for TEST_FAST mode")
         # Create a quick synthetic measurement profile from height for local testing
         h = float(height)
+        if body_unit.lower() in ("inch", "inches", "in"):
+            h *= 2.54
         body_measurements = {
             "chest": round(h * 0.52, 2),
             "waist": round(h * 0.45, 2),
@@ -77,7 +80,10 @@ async def recommend(
             tmp.write(await user_image.read())
             tmp_path = tmp.name
         try:
-            body_measurements = await body_client.analyze_file(height, tmp_path)
+            h_cm = float(height)
+            if body_unit.lower() in ("inch", "inches", "in"):
+                h_cm *= 2.54
+            body_measurements = await body_client.analyze_file(h_cm, tmp_path)
         finally:
             try:
                 os.remove(tmp_path)
@@ -130,6 +136,14 @@ async def recommend(
     else:
         raise HTTPException(status_code=400, detail="Provide either garment_scale_json or garment_image")
 
+    # Convert body measurements to user unit if needed (for Body API and synthetic cases)
+    # If measurements_json was provided, we assume they are already in body_unit
+    final_body_measurements = body_measurements.copy()
+    if not measurements_json and body_unit.lower() in ("inch", "inches", "in"):
+        final_body_measurements = {k: v / 2.54 for k, v in body_measurements.items()}
+    elif measurements_json:
+        final_body_measurements = body_measurements
+
     brand_chart = None
     if brand_chart_json:
         try:
@@ -138,11 +152,12 @@ async def recommend(
             raise HTTPException(status_code=400, detail="brand_chart_json must be a JSON object")
 
     result = await recommender.recommend(
-        body_measurements=body_measurements,
+        body_measurements=final_body_measurements,
         garment_scale=size_scale,
         garment_category_id=category_id,
         brand_scale=brand_chart,
         tone=tone,
+        user_unit=body_unit,
     )
 
     return RecommendResponse(

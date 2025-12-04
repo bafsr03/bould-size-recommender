@@ -6,55 +6,30 @@ from .llm import TailorLLM
 
 SIZE_ORDER: List[str] = ["XXS", "XS", "S", "M", "L", "XL", "XXL", "3XL", "4XL", "5XL", "6XL"]
 
+# Weights for scoring (higher = more important)
+METRIC_WEIGHTS = {
+    "chest": 2.0,
+    "waist": 1.5,
+    "hips": 1.5,
+    "shoulder_width": 1.2,
+    "default": 1.0
+}
 
-def _to_cm(value: float, unit: str) -> float:
-    u = (unit or "cm").lower()
-    if u in ("cm", "centimeter", "centimeters"):
-        return float(value)
-    if u in ("inch", "inches", "in"):
-        return float(value) * 2.54
-    return float(value)
+# Target ease (optimal slack) in CM
+TARGET_EASE_CM = {
+    "chest": 2.0,
+    "waist": 4.0,
+    "hips": 4.0,
+    "shoulder_width": 1.5,
+    "default": 2.0
+}
 
-
-def _normalize_scale(scale_obj: Dict[str, Any]) -> Dict[str, Dict[str, float]]:
-    unit = (scale_obj.get("unit") or "cm").lower()
-    scale = scale_obj.get("scale") or {}
-    
-    # Heuristic: Check if values look like inches even if unit says cm
-    # If we find chest/waist/hips values and they are all small (< 90), 
-    # it's extremely likely to be inches (since 90cm chest is ~35in, small-ish for adult)
-    # This is a safety net for missing/wrong unit data.
-    if unit in ("cm", "centimeter", "centimeters"):
-        all_small = True
-        has_metrics = False
-        for metrics in scale.values():
-            if not metrics: continue
-            for k, v in metrics.items():
-                if not isinstance(v, (int, float)): continue
-                if k.lower() in ("chest", "waist", "hips", "bust"):
-                    has_metrics = True
-                    if v > 90.0: # 90cm is ~35.5 inches. Wait, 90 inches is ~228cm.
-                        # If value is > 90, it's definitely CM (unless it's a tent).
-                        # 65 was too low (65in = 165cm). Some chests are > 65in.
-                        # Let's set it to 95. 95in = 241cm.
-                        all_small = False
-                        break
-            if not all_small:
-                break
-        
-        if has_metrics and all_small:
-            print("DEBUG: Detected implicit inches in scale table (values < 90). Treating as inches.")
-            unit = "inch"
-
-    out: Dict[str, Dict[str, float]] = {}
-    for size, metrics in scale.items():
-        out[size] = {k: _to_cm(v, unit) for k, v in (metrics or {}).items() if isinstance(v, (int, float))}
-    return out
-
+# Tolerance for negative slack (tightness) before severe penalty
+NEGATIVE_TOLERANCE_CM = 1.0
 
 def _metrics_for_category(category_id: int) -> List[str]:
-    upper = {3, 4, 5, 6, 7, 8, 9, 10}  # DF2 tops/jackets/sweaters/etc.
-    lower = {1, 2, 11, 12}  # shorts, trousers, jeans, skirt
+    upper = {3, 4, 5, 6, 7, 8, 9, 10}
+    lower = {1, 2, 11, 12}
     dress = {13}
     if category_id in upper:
         return ["chest", "waist", "shoulder_width", "sleeve_length"]
@@ -65,89 +40,62 @@ def _metrics_for_category(category_id: int) -> List[str]:
     return ["chest", "waist", "hips"]
 
 
-def _ease_for_metric(metric: str, category_id: int) -> float:
+def _get_metric_weight(metric: str, category_id: int) -> float:
     m = metric.lower()
-    if m in ("chest", "bust"):
-        return 6.0
-    if m in ("waist",):
-        return 4.0 if category_id not in {1, 2, 11, 12} else 2.0
-    if m in ("hips", "hip"):
-        return 4.0
-    if m in ("shoulder_width", "shoulder"):
-        return 1.5
-    if m in ("thigh",):
-        return 2.0
-    if m in ("inseam", "sleeve_length", "length"):
-        return 1.0
-    return 0.0
+    return METRIC_WEIGHTS.get(m, METRIC_WEIGHTS["default"])
 
 
-def convert_scale(scale_obj: Dict[str, Any], target_unit: str) -> Dict[str, Any]:
-    """
-    Convert a scale object to the target unit (cm or inch).
-    """
-    current_unit = (scale_obj.get("unit") or "cm").lower()
-    target_unit = target_unit.lower()
-    
-    # Normalize current unit
-    if current_unit in ("centimeter", "centimeters"):
-        current_unit = "cm"
-    elif current_unit in ("inch", "inches"):
-        current_unit = "in"
+def _get_target_ease(metric: str, category_id: int, unit: str) -> float:
+    m = metric.lower()
+    val_cm = TARGET_EASE_CM.get(m, TARGET_EASE_CM["default"])
+    if m == "waist" and category_id in {1, 2, 11, 12}:
+        val_cm = 2.0
         
-    # Normalize target unit
-    if target_unit in ("centimeter", "centimeters"):
-        target_unit = "cm"
-    elif target_unit in ("inch", "inches"):
-        target_unit = "in"
-
-    if current_unit == target_unit:
-        return scale_obj
-
-    # Conversion factor
-    if current_unit == "cm" and target_unit == "in":
-        factor = 1.0 / 2.54
-    elif current_unit == "in" and target_unit == "cm":
-        factor = 2.54
-    else:
-        # Unknown unit, return as is or handle error? For now assume cm/in only
-        return scale_obj
-
-    new_scale = {}
-    old_scale = scale_obj.get("scale") or {}
-    
-    for size, metrics in old_scale.items():
-        new_metrics = {}
-        for k, v in (metrics or {}).items():
-            if isinstance(v, (int, float)):
-                new_metrics[k] = round(v * factor, 2)
-            else:
-                new_metrics[k] = v
-        new_scale[size] = new_metrics
-        
-    return {
-        "unit": target_unit,
-        "scale": new_scale
-    }
+    if unit == "inch":
+        return val_cm / 2.54
+    return val_cm
 
 
-
-def _score_size(relevant_metrics: List[str], body: Dict[str, float], garment: Dict[str, float], category_id: int) -> Tuple[bool, float, Dict[str, float]]:
-    total_slack = 0.0
+def _score_size(relevant_metrics: List[str], body: Dict[str, float], garment: Dict[str, float], category_id: int, unit: str) -> Tuple[float, Dict[str, float]]:
+    total_score = 0.0
     details: Dict[str, float] = {}
-    all_ok = True
+    
     for m in relevant_metrics:
         b = body.get(m)
         g = garment.get(m)
         if b is None or g is None:
             continue
-        ease = _ease_for_metric(m, category_id)
-        slack = g - (b + ease)
+            
+        weight = _get_metric_weight(m, category_id)
+        target_ease = _get_target_ease(m, category_id, unit)
+        
+        # Actual slack in native unit
+        slack = g - b
         details[m] = slack
-        if slack < 0:
-            all_ok = False
-        total_slack += max(slack, 0.0)
-    return all_ok, total_slack, details
+        
+        # Deviation from target ease
+        deviation = slack - target_ease
+        
+        # Convert to CM for consistent penalty scoring
+        # If unit is inch, slack_cm = slack * 2.54
+        slack_cm = slack * 2.54 if unit == "inch" else slack
+        deviation_cm = deviation * 2.54 if unit == "inch" else deviation
+        
+        if deviation < 0:
+            # Too tight
+            if slack_cm < -NEGATIVE_TOLERANCE_CM:
+                # Negative slack beyond tolerance (very bad)
+                penalty = abs(slack_cm) * 10.0 * weight 
+            else:
+                # Positive slack but less than target
+                penalty = abs(deviation_cm) * 2.0 * weight
+        else:
+            # Too loose
+            penalty = abs(deviation_cm) * 1.0 * weight
+            
+        total_score += penalty
+        
+    return total_score, details
 
 
 class Recommender:
@@ -162,75 +110,142 @@ class Recommender:
         garment_category_id: int,
         brand_scale: Dict[str, Any] | None = None,
         tone: str | None = None,
+        user_unit: str = "cm",
     ) -> Dict[str, Any]:
-        # Normalize body to cm
-        body_cm = {k: _to_cm(v, self.default_unit) for k, v in body_measurements.items() if isinstance(v, (int, float))}
+        
+        # V2 Logic: Strict Unit Matching
+        # We assume the garment scale has explicit 'scale_cm' and 'scale_in' keys.
+        # We assume body_measurements are already in 'user_unit'.
+        
+        table = {}
+        calc_unit = user_unit
+        
+        # Helper to normalize keys (lowercase, map aliases)
+        def _norm_keys(t: Dict[str, Any]) -> Dict[str, Any]:
+            out = {}
+            for s, m in t.items():
+                out[s] = {}
+                for k, v in m.items():
+                    k_norm = k.lower()
+                    if k_norm == "shoulder_to_shoulder": k_norm = "shoulder_width"
+                    # Map hem to hips as they are often used interchangeably for bottom width
+                    if k_norm == "hem": k_norm = "hips"
+                    out[s][k_norm] = float(v)
+            return out
 
-        # Normalize garment scale and optional brand chart
-        scale_cm = _normalize_scale(garment_scale)
-        brand_cm = _normalize_scale(brand_scale) if brand_scale else None
+        # 1. Select Table
+        if brand_scale:
+            # Legacy support for brand charts (assume CM unless specified)
+            # Ideally brand charts should also be dual-unit V2.
+            # For now, we'll do a quick legacy normalization if it's old format.
+            # But if it has scale_cm/scale_in, we use that.
+            if user_unit == "inch" and "scale_in" in brand_scale:
+                table = _norm_keys(brand_scale["scale_in"])
+                calc_unit = "inch"
+            elif user_unit == "cm" and "scale_cm" in brand_scale:
+                table = _norm_keys(brand_scale["scale_cm"])
+                calc_unit = "cm"
+            else:
+                # Fallback: Assume brand scale is CM and normalize
+                # This is the only place we might need conversion if data is old
+                raw_scale = brand_scale.get("scale", {})
+                table = _norm_keys(raw_scale)
+                calc_unit = "cm" # Assume CM for legacy brand charts
+        else:
+            # Garment Scale from Pipeline
+            if user_unit == "inch" and "scale_in" in garment_scale:
+                table = _norm_keys(garment_scale["scale_in"])
+                calc_unit = "inch"
+            elif user_unit == "cm" and "scale_cm" in garment_scale:
+                table = _norm_keys(garment_scale["scale_cm"])
+                calc_unit = "cm"
+            else:
+                # Fallback for old pipeline data
+                raw_scale = garment_scale.get("scale", {})
+                table = _norm_keys(raw_scale)
+                # Try to guess unit from metadata, default to CM
+                declared = garment_scale.get("unit", "cm").lower()
+                if declared in ("inch", "inches", "in"):
+                    calc_unit = "inch"
+                else:
+                    calc_unit = "cm"
 
+        # 2. Prepare Body
+        # If calc_unit matches user_unit, use body as is.
+        # If mismatch (fallback case), convert body to calc_unit.
+        body_calc = body_measurements.copy()
+        if user_unit == "inch" and calc_unit == "cm":
+            body_calc = {k: v * 2.54 for k, v in body_measurements.items()}
+        elif user_unit == "cm" and calc_unit == "inch":
+            body_calc = {k: v / 2.54 for k, v in body_measurements.items()}
+            
+        # 3. Auto-Detect / Validate Category
+        # Heuristic: Check if the garment keys match the expected metrics for the category.
+        # If not, try to find a better category match.
+        
+        # Get all keys present in the garment table (using the first available size)
+        garment_keys = set()
+        if table:
+            first_size = next(iter(table))
+            garment_keys = set(table[first_size].keys())
+
+        expected_metrics = set(_metrics_for_category(garment_category_id))
+        
+        # Calculate overlap with current category
+        current_overlap = len(garment_keys.intersection(expected_metrics))
+        
+        # Check alternative: If current is Lower (1), check Upper (3). If Upper (3), check Lower (1).
+        # We use 3 (Top) and 1 (Pants) as representatives.
+        alt_category_id = 3 if garment_category_id in {1, 2, 11, 12} else 1
+        alt_metrics = set(_metrics_for_category(alt_category_id))
+        alt_overlap = len(garment_keys.intersection(alt_metrics))
+        
+        # If alternative has significantly better overlap, switch.
+        # "Significantly" means at least 2 more matching keys, or if current has 0/1 and alt has 2+.
+        if alt_overlap > current_overlap + 1:
+            print(f"DEBUG: Auto-Switching Category from {garment_category_id} to {alt_category_id} based on keys {garment_keys}")
+            garment_category_id = alt_category_id
+            
         relevant = _metrics_for_category(garment_category_id)
 
-        # Choose table to evaluate: prefer brand if provided, otherwise measurement-derived
-        table = brand_cm or scale_cm
-
-        print(f"DEBUG: Body Measurements (cm): {body_cm}")
-        print(f"DEBUG: Garment Scale Table: {json.dumps(table, indent=2)}")
-
-        best_ok_size = None
-        best_ok_score = float("inf")
-        best_ok_details: Dict[str, float] = {}
-
-        best_fallback_size = None
-        best_fallback_score = float("inf")
-        best_fallback_details: Dict[str, float] = {}
+        print(f"DEBUG: V2 Recommender | User Unit: {user_unit} | Calc Unit: {calc_unit}")
+        print(f"DEBUG: Body: {body_calc}")
+        print(f"DEBUG: Garment Table: {table}")
+        
+        best_size = None
+        best_score = float("inf")
+        best_details: Dict[str, float] = {}
 
         for size in SIZE_ORDER:
             if size not in table:
                 continue
-            ok, score, details = _score_size(relevant, body_cm, table[size], garment_category_id)
             
-            if ok:
-                # It fits! Look for the tightest fit (lowest score) among fitting sizes.
-                if score < best_ok_score:
-                    best_ok_size = size
-                    best_ok_score = score
-                    best_ok_details = details
-            else:
-                # It doesn't fit. Track the "least bad" failure as fallback.
-                # We use (score + penalty) to find the one closest to fitting.
-                penalty = sum(-v for v in details.values() if v < 0)
-                combined_score = score + penalty
-                if combined_score < best_fallback_score:
-                    best_fallback_size = size
-                    best_fallback_score = combined_score
-                    best_fallback_details = details
-
-        # Prefer the best fitting size; if none fit, use the best fallback
-        if best_ok_size is not None:
-            best_size = best_ok_size
-            best_details = best_ok_details
-        else:
-            best_size = best_fallback_size
-            best_details = best_fallback_details
+            score, details = _score_size(relevant, body_calc, table[size], garment_category_id, calc_unit)
+            
+            if score < best_score:
+                best_score = score
+                best_size = size
+                best_details = details
 
         if best_size is None:
-            # fallback to true_size if present in table else closest available
-            for s in SIZE_ORDER:
+             for s in SIZE_ORDER:
                 if s in table:
                     best_size = s
-                    best_details = {}
                     break
 
-        # Confidence heuristic
-        violations = sum(1 for v in best_details.values() if v < 0)
-        avg_slack = sum(max(v, 0.0) for v in best_details.values()) / max(len(best_details) or 1, 1)
-        confidence = max(0.0, 1.0 - 0.1 * violations - 0.02 * avg_slack)
+        confidence = max(0.0, 1.0 - (best_score / 100.0))
+        
+        # Critical failure check (using CM threshold)
+        critical_metrics = ["chest", "waist", "hips"]
+        for m in critical_metrics:
+            if m in best_details:
+                slack_cm = best_details[m] * 2.54 if calc_unit == "inch" else best_details[m]
+                if slack_cm < -2.0:
+                    confidence *= 0.8
 
         tailor_feedback_data = await self.llm.generate_feedback(
             category_id=garment_category_id,
-            body=body_cm,
+            body=body_calc, # Pass used body measurements
             garment=table.get(best_size, {}),
             slacks=best_details,
             size=best_size or "",
@@ -243,8 +258,8 @@ class Recommender:
         return {
             "recommended_size": best_size or "",
             "confidence": round(confidence, 3),
-            "match_details": {"slacks_cm": best_details},
-            "tailor_feedback": final_feedback,  # Backward compatibility
+            "match_details": {"slacks": best_details, "unit": calc_unit},
+            "tailor_feedback": final_feedback,
             "preview_feedback": preview_feedback,
             "final_feedback": final_feedback,
         }

@@ -1,4 +1,4 @@
-from typing import Dict, Optional, List
+from typing import Dict, Optional, List, Any
 from pydantic import BaseModel, Field
 
 
@@ -21,7 +21,7 @@ class MeasurementInput(BaseModel):
 class RecommendResponse(BaseModel):
     recommended_size: str
     confidence: float
-    match_details: Dict[str, Dict[str, float]]
+    match_details: Dict[str, Any]
     tailor_feedback: str  # Kept for backward compatibility
     preview_feedback: List[str]
     final_feedback: str
