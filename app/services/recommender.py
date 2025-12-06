@@ -113,6 +113,11 @@ class Recommender:
         user_unit: str = "cm",
     ) -> Dict[str, Any]:
         
+        # Normalize user_unit
+        user_unit = user_unit.lower().strip()
+        if user_unit in ("inches", "in", "feet", "ft"):
+            user_unit = "inch"
+        
         # V2 Logic: Strict Unit Matching
         # We assume the garment scale has explicit 'scale_cm' and 'scale_in' keys.
         # We assume body_measurements are already in 'user_unit'.
