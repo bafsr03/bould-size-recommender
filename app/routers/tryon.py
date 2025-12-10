@@ -71,6 +71,33 @@ async def try_on(
             output_format="png",
             image_size="1:1",
         )
+        
+        # Check for error responses from the NanoBanana API
+        error_code = payload.get("code")
+        is_error = False
+        error_msg = None
+        
+        if error_code is not None:
+            if isinstance(error_code, int) and error_code != 200:
+                is_error = True
+            elif isinstance(error_code, str) and str(error_code).lower() not in ("success", "ok", "200"):
+                is_error = True
+        
+        if is_error:
+            error_msg = payload.get("msg") or payload.get("message") or f"NanoBanana API error (code: {error_code})"
+            # Map common error codes to HTTP status
+            http_status = 502  # Default to bad gateway
+            if error_code == 402:
+                http_status = 402
+                error_msg = f"Try-on service credits exhausted: {error_msg}"
+            elif error_code == 401 or error_code == 403:
+                http_status = 502
+                error_msg = f"Try-on service authentication failed: {error_msg}"
+            elif error_code == 429:
+                http_status = 429
+                error_msg = f"Try-on service rate limit exceeded: {error_msg}"
+            raise HTTPException(status_code=http_status, detail=error_msg)
+        
         # Normalize task id
         data_block = payload.get("data", {}) if isinstance(payload.get("data"), dict) else {}
         task_id = (
@@ -84,8 +111,14 @@ async def try_on(
             or data_block.get("jobId")
             or data_block.get("job_id")
         )
-        if task_id:
-            _nano_tasks[task_id] = {"status": "queued", "provider": "nano", "payload": payload}
+        
+        if not task_id:
+            raise HTTPException(
+                status_code=502, 
+                detail="Try-on service did not return a task ID. The service may be experiencing issues."
+            )
+        
+        _nano_tasks[task_id] = {"status": "queued", "provider": "nano", "payload": payload}
         # Return 202 to indicate async processing
         return {"success": True, "provider": "nano", "status": "queued", "task_id": task_id, "task": payload}
 
