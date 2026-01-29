@@ -25,5 +25,5 @@ class RecommendResponse(BaseModel):
     tailor_feedback: str  # Kept for backward compatibility
     preview_feedback: List[str]
     final_feedback: str
-    debug: Dict[str, str] | None = None
+    debug: Dict[str, Any] | None = None  # Can contain structured debug info when debug flag is set
 
