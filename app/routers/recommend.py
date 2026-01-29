@@ -151,6 +151,31 @@ async def recommend(
         except Exception:
             raise HTTPException(status_code=400, detail="brand_chart_json must be a JSON object")
 
+    # Extract height if available for guardrails
+    height_cm_for_guardrail = None
+    if height is not None:
+        h = float(height)
+        if body_unit.lower() in ("inch", "inches", "in"):
+            height_cm_for_guardrail = h * 2.54
+        else:
+            height_cm_for_guardrail = h
+    # Also check if height is in measurements_json
+    elif measurements_json:
+        try:
+            parsed = json.loads(measurements_json)
+            if "height" in parsed:
+                h = float(parsed["height"])
+                # Assume height in measurements_json is in body_unit
+                if body_unit.lower() in ("inch", "inches", "in"):
+                    height_cm_for_guardrail = h * 2.54
+                else:
+                    height_cm_for_guardrail = h
+        except Exception:
+            pass
+    
+    # Check for debug flag in request or environment
+    debug_mode = os.getenv("DEBUG_RECOMMENDATIONS", "0") == "1"
+    
     result = await recommender.recommend(
         body_measurements=final_body_measurements,
         garment_scale=size_scale,
@@ -158,8 +183,19 @@ async def recommend(
         brand_scale=brand_chart,
         tone=tone,
         user_unit=body_unit,
+        height_cm=height_cm_for_guardrail,
+        debug=debug_mode,
     )
 
+    # Build debug object - include structured debug if available, plus legacy fields
+    debug_obj = {
+        "measurement_vis_url": measurement_vis or "",
+        "size_scale_unit": size_scale.get("unit", ""),
+    }
+    # Merge in structured debug from recommender if available
+    if "debug" in result:
+        debug_obj.update(result["debug"])
+    
     return RecommendResponse(
         recommended_size=result["recommended_size"],
         confidence=result["confidence"],
@@ -167,9 +203,6 @@ async def recommend(
         tailor_feedback=result["tailor_feedback"],
         preview_feedback=result.get("preview_feedback", []),
         final_feedback=result.get("final_feedback", ""),
-        debug={
-            "measurement_vis_url": measurement_vis or "",
-            "size_scale_unit": size_scale.get("unit", ""),
-        },
+        debug=debug_obj if debug_obj else None,
     )
 
