@@ -27,6 +27,25 @@ TARGET_EASE_CM = {
 # Tolerance for negative slack (tightness) before severe penalty
 NEGATIVE_TOLERANCE_CM = 1.0
 
+# Height-based minimum size guardrails (cm)
+# For users above this height, enforce minimum size unless explicitly tight fit
+HEIGHT_GUARDRAILS = {
+    183: {  # 6'0" = 183cm
+        "min_size": "L",
+        "min_chest": 95.0,
+        "min_shoulder": 42.0,
+    },
+    190: {  # 6'3" = 190cm
+        "min_size": "XL",
+        "min_chest": 98.0,
+        "min_shoulder": 44.0,
+    },
+}
+
+# Confidence thresholds
+MIN_CONFIDENCE_THRESHOLD = 0.3  # Below this, recommendation is unreliable
+WARNING_CONFIDENCE_THRESHOLD = 0.5  # Below this, show warning
+
 def _metrics_for_category(category_id: int) -> List[str]:
     upper = {3, 4, 5, 6, 7, 8, 9, 10}
     lower = {1, 2, 11, 12}
@@ -56,19 +75,27 @@ def _get_target_ease(metric: str, category_id: int, unit: str) -> float:
     return val_cm
 
 
-def _score_size(relevant_metrics: List[str], body: Dict[str, float], garment: Dict[str, float], category_id: int, unit: str) -> Tuple[float, Dict[str, float]]:
+def _score_size(relevant_metrics: List[str], body: Dict[str, float], garment: Dict[str, float], category_id: int, unit: str) -> Tuple[float, Dict[str, float], Dict[str, Any]]:
+    """
+    Score a size based on body vs garment measurements.
+    Returns: (total_score, details_dict, debug_info)
+    """
     total_score = 0.0
     details: Dict[str, float] = {}
-    
+    missing_metrics: List[str] = []
+    scored_metrics: List[str] = []
+
     for m in relevant_metrics:
         b = body.get(m)
         g = garment.get(m)
         if b is None or g is None:
+            missing_metrics.append(m)
             continue
-            
+        
+        scored_metrics.append(m)
         weight = _get_metric_weight(m, category_id)
         target_ease = _get_target_ease(m, category_id, unit)
-        
+
         # Actual slack in native unit
         slack = g - b
         details[m] = slack
@@ -94,8 +121,25 @@ def _score_size(relevant_metrics: List[str], body: Dict[str, float], garment: Di
             penalty = abs(deviation_cm) * 1.0 * weight
             
         total_score += penalty
-        
-    return total_score, details
+    
+    # CRITICAL FIX: Penalize missing critical metrics
+    # Missing metrics mean we can't properly evaluate the size
+    # Apply penalty based on importance of missing metrics
+    missing_penalty = 0.0
+    for m in missing_metrics:
+        weight = _get_metric_weight(m, category_id)
+        # Penalty: 50 points per missing metric, weighted by importance
+        missing_penalty += 50.0 * weight
+    
+    total_score += missing_penalty
+    
+    debug_info = {
+        "scored_metrics": scored_metrics,
+        "missing_metrics": missing_metrics,
+        "missing_penalty": missing_penalty,
+    }
+    
+    return total_score, details, debug_info
 
 
 class Recommender:
@@ -111,12 +155,31 @@ class Recommender:
         brand_scale: Dict[str, Any] | None = None,
         tone: str | None = None,
         user_unit: str = "cm",
+        height_cm: float | None = None,  # Optional height for guardrails
+        debug: bool = False,  # Enable debug output
     ) -> Dict[str, Any]:
-        
+
         # Normalize user_unit
         user_unit = user_unit.lower().strip()
         if user_unit in ("inches", "in", "feet", "ft"):
             user_unit = "inch"
+
+        # CHART_TYPE VALIDATION: Fail fast if chart_type is missing (unless legacy data)
+        chart_type = None
+        if brand_scale:
+            chart_type = brand_scale.get("chart_type")
+        else:
+            chart_type = garment_scale.get("chart_type")
+        
+        # For new data, chart_type is required
+        # For legacy data (no chart_type), default to "garment" but log warning
+        if chart_type is None:
+            # Legacy support: default to "garment" for backward compatibility
+            chart_type = "garment"
+            if debug:
+                print("WARNING: chart_type missing, defaulting to 'garment'")
+        elif chart_type not in ("garment", "body"):
+            raise ValueError(f"Invalid chart_type: {chart_type}. Must be 'garment' or 'body'")
         
         # V2 Logic: Strict Unit Matching
         # We assume the garment scale has explicit 'scale_cm' and 'scale_in' keys.
@@ -213,19 +276,54 @@ class Recommender:
             
         relevant = _metrics_for_category(garment_category_id)
 
-        print(f"DEBUG: V2 Recommender | User Unit: {user_unit} | Calc Unit: {calc_unit}")
-        print(f"DEBUG: Body: {body_calc}")
-        print(f"DEBUG: Garment Table: {table}")
+        # HEIGHT-BASED GUARDRAILS: Validate body measurements make sense for height
+        guardrail_min_size = None
+        guardrail_reason = None
+        if height_cm is not None:
+            # Find applicable guardrail
+            for threshold_height in sorted(HEIGHT_GUARDRAILS.keys(), reverse=True):
+                if height_cm >= threshold_height:
+                    guardrail = HEIGHT_GUARDRAILS[threshold_height]
+                    guardrail_min_size = guardrail["min_size"]
+                    
+                    # Check if body measurements meet minimums
+                    chest = body_calc.get("chest")
+                    shoulder = body_calc.get("shoulder_width")
+                    
+                    if chest and chest < guardrail["min_chest"]:
+                        guardrail_reason = f"chest {chest}cm below minimum {guardrail['min_chest']}cm for {height_cm}cm height"
+                    elif shoulder and shoulder < guardrail["min_shoulder"]:
+                        guardrail_reason = f"shoulder {shoulder}cm below minimum {guardrail['min_shoulder']}cm for {height_cm}cm height"
+                    else:
+                        guardrail_reason = f"height {height_cm}cm requires minimum size {guardrail_min_size}"
+                    break
+
+        if debug:
+            print(f"DEBUG: V2 Recommender | User Unit: {user_unit} | Calc Unit: {calc_unit}")
+            print(f"DEBUG: Chart Type: {chart_type}")
+            print(f"DEBUG: Body: {body_calc}")
+            print(f"DEBUG: Height: {height_cm}cm" if height_cm else "DEBUG: Height: not provided")
+            print(f"DEBUG: Guardrail: {guardrail_min_size}" if guardrail_min_size else "DEBUG: Guardrail: none")
+            print(f"DEBUG: Garment Table: {table}")
         
         best_size = None
         best_score = float("inf")
         best_details: Dict[str, float] = {}
+        all_scores_debug: Dict[str, Dict[str, Any]] = {}  # For debug output
 
         for size in SIZE_ORDER:
             if size not in table:
                 continue
             
-            score, details = _score_size(relevant, body_calc, table[size], garment_category_id, calc_unit)
+            score, details, score_debug = _score_size(relevant, body_calc, table[size], garment_category_id, calc_unit)
+            
+            if debug:
+                all_scores_debug[size] = {
+                    "score": score,
+                    "deltas": details,
+                    "missing_metrics": score_debug.get("missing_metrics", []),
+                    "scored_metrics": score_debug.get("scored_metrics", []),
+                }
             
             if score < best_score:
                 best_score = score
@@ -238,15 +336,62 @@ class Recommender:
                     best_size = s
                     break
 
-        confidence = max(0.0, 1.0 - (best_score / 100.0))
+        # IMPROVED CONFIDENCE CALCULATION
+        # Base confidence from score
+        base_confidence = max(0.0, 1.0 - (best_score / 100.0))
+
+        # Penalize for missing critical metrics
+        critical_metrics = ["chest", "waist", "hips"]
+        missing_critical = [m for m in critical_metrics if m not in best_details]
+        if missing_critical:
+            # Reduce confidence by 20% per missing critical metric
+            base_confidence *= (1.0 - 0.2 * len(missing_critical))
         
         # Critical failure check (using CM threshold)
-        critical_metrics = ["chest", "waist", "hips"]
         for m in critical_metrics:
             if m in best_details:
                 slack_cm = best_details[m] * 2.54 if calc_unit == "inch" else best_details[m]
                 if slack_cm < -2.0:
-                    confidence *= 0.8
+                    base_confidence *= 0.8
+        
+        confidence = max(0.0, min(1.0, base_confidence))
+        
+        # APPLY HEIGHT GUARDRAILS: Enforce minimum size for tall users
+        reason_codes = []
+        if guardrail_min_size and best_size:
+            # Check if recommended size violates guardrail
+            size_order_idx = SIZE_ORDER.index(best_size) if best_size in SIZE_ORDER else -1
+            min_size_idx = SIZE_ORDER.index(guardrail_min_size) if guardrail_min_size in SIZE_ORDER else -1
+            
+            if size_order_idx >= 0 and min_size_idx >= 0 and size_order_idx < min_size_idx:
+                # Recommended size is smaller than minimum
+                if tone and tone.lower() in ("tight", "slim", "fitted"):
+                    # Allow if user explicitly wants tight fit
+                    reason_codes.append("GUARDRAIL_OVERRIDE_TIGHT_FIT")
+                else:
+                    # Enforce minimum size
+                    old_size = best_size
+                    best_size = guardrail_min_size
+                    reason_codes.append(f"GUARDRAIL_ENFORCED_{old_size}_TO_{guardrail_min_size}")
+                    
+                    # Recalculate for enforced size
+                    if best_size in table:
+                        score, details, _ = _score_size(relevant, body_calc, table[best_size], garment_category_id, calc_unit)
+                        best_score = score
+                        best_details = details
+                        # Reduce confidence due to guardrail enforcement
+                        confidence *= 0.85
+                        reason_codes.append(f"GUARDRAIL_REASON_{guardrail_reason}")
+        
+        # CONFIDENCE THRESHOLD: If confidence too low, add warning or fallback
+        if confidence < MIN_CONFIDENCE_THRESHOLD:
+            reason_codes.append("LOW_CONFIDENCE")
+            # Fallback: Recommend size range instead of single size
+            # Or ask for additional measurements
+            if debug:
+                print(f"WARNING: Confidence {confidence} below threshold {MIN_CONFIDENCE_THRESHOLD}")
+        elif confidence < WARNING_CONFIDENCE_THRESHOLD:
+            reason_codes.append("CONFIDENCE_WARNING")
 
         tailor_feedback_data = await self.llm.generate_feedback(
             category_id=garment_category_id,
@@ -260,7 +405,7 @@ class Recommender:
         final_feedback = tailor_feedback_data.get("final", "")
         preview_feedback = tailor_feedback_data.get("preview", [])
 
-        return {
+        result = {
             "recommended_size": best_size or "",
             "confidence": round(confidence, 3),
             "match_details": {"slacks": best_details, "unit": calc_unit},
@@ -268,4 +413,28 @@ class Recommender:
             "preview_feedback": preview_feedback,
             "final_feedback": final_feedback,
         }
+        
+        # DEBUG OUTPUT: Only include if debug flag is set
+        if debug:
+            result["debug"] = {
+                "normalized_units": {
+                    "user_unit": user_unit,
+                    "calc_unit": calc_unit,
+                },
+                "chart_type": chart_type,
+                "body_metrics_used": body_calc,
+                "garment_scale_used": {k: list(v.keys()) for k, v in table.items()},
+                "per_size_deltas": {size: all_scores_debug.get(size, {}).get("deltas", {}) for size in SIZE_ORDER if size in table},
+                "per_size_scores": {size: all_scores_debug.get(size, {}).get("score", 0) for size in SIZE_ORDER if size in table},
+                "chosen_size": best_size,
+                "chosen_score": best_score,
+                "confidence": round(confidence, 3),
+                "reason_codes": reason_codes,
+                "height_cm": height_cm,
+                "guardrail_applied": guardrail_min_size if guardrail_min_size else None,
+                "relevant_metrics": relevant,
+                "category_id": garment_category_id,
+            }
+        
+        return result
 
