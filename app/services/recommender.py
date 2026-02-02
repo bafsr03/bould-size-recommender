@@ -46,6 +46,60 @@ HEIGHT_GUARDRAILS = {
 MIN_CONFIDENCE_THRESHOLD = 0.3  # Below this, recommendation is unreliable
 WARNING_CONFIDENCE_THRESHOLD = 0.5  # Below this, show warning
 
+
+def get_height_based_size_range(height_cm: float, is_lean: bool = False) -> Tuple[str, str]:
+    """
+    Get recommended size range based on height.
+    Returns (min_size, max_size) tuple.
+    
+    Height ranges:
+    - Under 5'5" (165cm): XS to S
+    - 5'5" to 5'8" (165-173cm): S to L
+    - 5'7" to 5'10" (170-178cm): M to L
+    - 5'11" to 6'2" (180-188cm): L to XL
+    - Over 6'2" (188cm+): XL to up, unless lean
+    """
+    if height_cm < 165:  # Under 5'5"
+        return ("XS", "S")
+    elif height_cm < 170:  # 5'5" to 5'7" (exclusive of 5'7")
+        return ("S", "L")
+    elif height_cm < 178:  # 5'7" to 5'10"
+        return ("M", "L")
+    elif height_cm < 188:  # 5'11" to 6'2"
+        return ("L", "XL")
+    else:  # Over 6'2"
+        if is_lean:
+            return ("L", "XL")  # Lean users may fit in L-XL
+        else:
+            return ("XL", "XXL")  # Standard to larger builds need XL+
+
+
+def detect_lean_body_type(body_measurements: Dict[str, float], height_cm: float) -> bool:
+    """
+    Detect if user has a lean body type based on measurements.
+    A lean body type is characterized by:
+    - Lower chest-to-height ratio
+    - Lower waist-to-height ratio
+    - Higher shoulder-to-waist ratio (more V-shaped)
+    """
+    chest = body_measurements.get("chest")
+    waist = body_measurements.get("waist")
+    
+    if not chest or not waist or not height_cm:
+        return False
+    
+    # Calculate ratios
+    chest_to_height = chest / height_cm
+    waist_to_height = waist / height_cm
+    
+    # Lean thresholds (empirically determined)
+    # Average chest-to-height: ~0.55, lean: < 0.53
+    # Average waist-to-height: ~0.47, lean: < 0.45
+    is_lean = (chest_to_height < 0.53) and (waist_to_height < 0.45)
+    
+    return is_lean
+
+
 def _metrics_for_category(category_id: int) -> List[str]:
     upper = {3, 4, 5, 6, 7, 8, 9, 10}
     lower = {1, 2, 11, 12}
@@ -298,11 +352,20 @@ class Recommender:
                         guardrail_reason = f"height {height_cm}cm requires minimum size {guardrail_min_size}"
                     break
 
+        # HEIGHT-BASED SIZE RANGE: Get recommended range based on height
+        height_size_range = None
+        is_lean = False
+        if height_cm is not None:
+            is_lean = detect_lean_body_type(body_calc, height_cm)
+            height_size_range = get_height_based_size_range(height_cm, is_lean)
+        
         if debug:
             print(f"DEBUG: V2 Recommender | User Unit: {user_unit} | Calc Unit: {calc_unit}")
             print(f"DEBUG: Chart Type: {chart_type}")
             print(f"DEBUG: Body: {body_calc}")
             print(f"DEBUG: Height: {height_cm}cm" if height_cm else "DEBUG: Height: not provided")
+            print(f"DEBUG: Lean Body Type: {is_lean}")
+            print(f"DEBUG: Height-Based Range: {height_size_range}" if height_size_range else "DEBUG: Height Range: none")
             print(f"DEBUG: Guardrail: {guardrail_min_size}" if guardrail_min_size else "DEBUG: Guardrail: none")
             print(f"DEBUG: Garment Table: {table}")
         
@@ -311,11 +374,36 @@ class Recommender:
         best_details: Dict[str, float] = {}
         all_scores_debug: Dict[str, Dict[str, Any]] = {}  # For debug output
 
-        for size in SIZE_ORDER:
+        # Determine which sizes to consider based on height range
+        sizes_to_consider = SIZE_ORDER
+        if height_size_range:
+            min_size, max_size = height_size_range
+            min_idx = SIZE_ORDER.index(min_size) if min_size in SIZE_ORDER else 0
+            max_idx = SIZE_ORDER.index(max_size) if max_size in SIZE_ORDER else len(SIZE_ORDER) - 1
+            
+            # STRICT MODE: Do not allow slack outside the range
+            # We strictly clip to the recommended range
+            sizes_to_consider = SIZE_ORDER[min_idx:max_idx + 1]
+            
+            if debug:
+                print(f"DEBUG: Constrained sizes to: {sizes_to_consider}")
+
+        for size in sizes_to_consider:
             if size not in table:
                 continue
             
             score, details, score_debug = _score_size(relevant, body_calc, table[size], garment_category_id, calc_unit)
+            
+            # Apply bonus for sizes within the height-based range
+            if height_size_range:
+                min_size, max_size = height_size_range
+                if min_size in SIZE_ORDER and max_size in SIZE_ORDER:
+                    min_idx = SIZE_ORDER.index(min_size)
+                    max_idx = SIZE_ORDER.index(max_size)
+                    size_idx = SIZE_ORDER.index(size)
+                    if min_idx <= size_idx <= max_idx:
+                        # Size is within recommended range, apply small bonus
+                        score *= 0.95  # 5% bonus for being in height-recommended range
             
             if debug:
                 all_scores_debug[size] = {
