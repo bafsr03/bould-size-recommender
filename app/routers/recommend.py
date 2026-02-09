@@ -34,6 +34,7 @@ async def recommend(
     brand_chart_json: Optional[str] = Form(None),
     tone: Optional[str] = Form(None),
     body_unit: str = Form("cm"),
+    include_debug: bool = Form(False),
 ) -> RecommendResponse:
     body_client = BodyApiClient()
     garment_client = GarmentApiClient()
@@ -174,7 +175,7 @@ async def recommend(
             pass
     
     # Check for debug flag in request or environment
-    debug_mode = os.getenv("DEBUG_RECOMMENDATIONS", "0") == "1"
+    debug_mode = (os.getenv("DEBUG_RECOMMENDATIONS", "0") == "1") or include_debug
     
     result = await recommender.recommend(
         body_measurements=final_body_measurements,
